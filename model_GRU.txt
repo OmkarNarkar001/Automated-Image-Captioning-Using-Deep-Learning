@@ -1,0 +1,66 @@
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import torch.nn.functional as F
+
+# --------------- Encoder Model -----------------
+class EncoderCNN(nn.Module):
+    def __init__(self, embedding_dim):
+        super(EncoderCNN, self).__init__()
+        resnet_model = models.resnet50(pretrained=True)
+        for param in resnet_model.parameters():
+            param.requires_grad_(False)
+
+        layers = list(resnet_model.children())[:-1]
+        self.resnet = nn.Sequential(*layers)
+        self.fc = nn.Linear(resnet_model.fc.in_features, embedding_dim)
+
+    def forward(self, images):
+        features = self.resnet(images)
+        features = features.view(features.size(0), -1)
+        features = self.fc(features)
+        return features
+
+# --------------- Decoder Model -----------------
+class DecoderRNN(nn.Module):
+    def __init__(self, embedding_dim, hidden_dim, vocab_size, num_layers=1):
+        super(DecoderRNN, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.word_embeddings = nn.Embedding(vocab_size, embedding_dim)
+        self.gru = nn.GRU(embedding_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, vocab_size)
+        self.hidden = torch.zeros(num_layers, 1, hidden_dim)
+
+    def forward(self, image_features, captions):
+        device = image_features.device
+
+        caption_embeddings = self.word_embeddings(captions[:, :-1])
+        embeddings = torch.cat((image_features.unsqueeze(1), caption_embeddings), dim=1)
+
+        batch_size = image_features.size(0)
+        self.hidden = torch.zeros(self.gru.num_layers, batch_size, self.hidden_dim).to(device)
+
+        gru_output, self.hidden = self.gru(embeddings, self.hidden)
+        outputs = self.fc(gru_output)
+
+        return outputs
+
+    def generate_caption(self, inputs, states=None, max_length=20):
+        caption_indices = []
+        device = inputs.device
+
+        if states is None:
+            states = torch.zeros(self.gru.num_layers, 1, self.hidden_dim).to(device)
+
+        for _ in range(max_length):
+            gru_output, states = self.gru(inputs, states)
+            outputs = self.fc(gru_output.squeeze(1))
+            _, predicted_idx = outputs.max(1)
+            caption_indices.append(predicted_idx.item())
+
+            if predicted_idx == 1:
+                break
+
+            inputs = self.word_embeddings(predicted_idx).to(device).unsqueeze(1)
+
+        return caption_indices

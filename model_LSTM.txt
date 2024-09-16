@@ -1,0 +1,60 @@
+import torch
+import torch.nn as nn
+import torchvision.models as models
+
+# ----------- Encoder ------------
+class EncoderCNN(nn.Module):
+    def __init__(self, embedding_size):
+        super(EncoderCNN, self).__init__()
+        resnet_model = models.resnet50(pretrained=True)
+        
+        # Set model param training false (gradient calcuation to false)
+        for param in resnet_model.parameters():
+            param.requires_grad_(False)
+
+        # Remove the final layer of ResNet
+        modules = list(resnet_model.children())[:-1]
+        self.resnet = nn.Sequential(*modules)
+        self.fc = nn.Linear(resnet_model.fc.in_features, embedding_size)
+
+    def forward(self, images):
+        feature_vectors = self.resnet(images)
+        feature_vectors = feature_vectors.view(feature_vectors.size(0), -1)
+        embedded_features = self.fc(feature_vectors)
+        return embedded_features
+
+# --------- Decoder ----------
+class DecoderRNN(nn.Module):
+    def __init__(self, embedding_size, hidden_size, vocab_size, num_layers=1):
+        super(DecoderRNN, self).__init__()
+
+        self.hidden_dim = hidden_size
+        self.word_embeddings = nn.Embedding(vocab_size, embedding_size)
+        self.lstm = nn.LSTM(embedding_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+        self.hidden = (torch.zeros(1, 1, hidden_size), torch.zeros(1, 1, hidden_size))
+
+    def forward(self, image_features, captions):
+        caption_embeddings = self.word_embeddings(captions[:, :-1])
+        embeddings = torch.cat((image_features.unsqueeze(1), caption_embeddings), dim=1)
+        
+        lstm_output, self.hidden = self.lstm(embeddings)
+        outputs = self.fc(lstm_output)
+
+        return outputs
+
+    def generate_caption(self, inputs, states=None, max_len=20):
+        generated_ids = []
+
+        for _ in range(max_len):
+            lstm_output, states = self.lstm(inputs, states)
+            predictions = self.fc(lstm_output.squeeze(dim=1))
+            _, predicted_idx = predictions.max(dim=1)
+            generated_ids.append(predicted_idx.item())
+            
+            if predicted_idx == 1:  # Assuming 1 is the index for <end>
+                break
+
+            inputs = self.word_embeddings(predicted_idx).unsqueeze(1)
+
+        return generated_ids

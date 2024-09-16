@@ -1,0 +1,301 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import math
+from model import EncoderCNN, DecoderRNN
+# from model_GRU import EncoderCNN, DecoderRNN
+from data_loader_val import get_loader as val_get_loader
+from pycocotools.coco import COCO
+from torchvision import transforms
+from tqdm.notebook import tqdm
+import torch.nn as nn
+import torch
+import torch.utils.data as data
+from collections import defaultdict
+import json
+import os
+import sys
+import numpy as np
+from nlp_utils import clean_sentence, bleu_score
+
+get_ipython().run_line_magic('load_ext', 'autoreload')
+get_ipython().run_line_magic('autoreload', '2')
+
+
+# In[2]:
+
+
+# Setting hyperparameters
+batch_size = 256  # batch size
+vocab_threshold = 5  # minimum word count threshold
+vocab_from_file = True  # if True, load existing vocab file
+embed_size = 256  # dimensionality of image and word embeddings
+hidden_size = 512  # number of features in hidden state of the RNN decoder
+coco_data = r"C:\Users\harsh\Documents"
+
+
+# In[3]:
+
+
+transform_test = transforms.Compose(
+    [
+        transforms.Resize(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            (0.485, 0.456, 0.406),  # normalize image for pre-trained model
+            (0.229, 0.224, 0.225),
+        ),
+    ]
+)
+
+
+# Create the data loader.
+val_data_loader = val_get_loader(
+    transform=transform_test, mode="valid", cocoapi_loc=coco_data
+)
+# val_loss = validate(encoder, decoder, criterion, val_data_loader, device)
+encoder_file = "encoder-final-5.pkl"
+decoder_file = "decoder-final-5.pkl" #-3
+
+vocab_size = 11543#len(data_loader.dataset.vocab) #1
+embed_size = 256  # dimensionality of image and word embeddings
+hidden_size = 512  # number of features in hidden state of the RNN decoder
+
+# Initializing the encoder and decoder
+encoder = EncoderCNN(embed_size)
+decoder = DecoderRNN(embed_size, hidden_size, vocab_size)
+
+checkpoint = torch.load("models/LSTM/LSTM_checkpoint-5.pkl")
+# checkpoint = torch.load("models/GRU/GRU_checkpoint-5.pkl")
+
+encoder.load_state_dict(checkpoint['encoder_state_dict'])
+decoder.load_state_dict(checkpoint['decoder_state_dict'])
+#  CUDA is available.
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+encoder.to(device)
+decoder.to(device)
+
+encoder.eval()
+decoder.eval()
+
+
+# In[4]:
+
+
+vocab_size
+
+
+# In[6]:
+
+
+# infer captions for all images
+from tqdm import tqdm
+predicted_captions = defaultdict(list)
+
+for image_id, image_tensor in tqdm(val_data_loader):
+    image_tensor = image_tensor.to(device)
+    
+    with torch.no_grad():
+        image_features = encoder(image_tensor).unsqueeze(1)
+        generated_output = decoder.generate_caption(image_features)
+    
+    generated_sentence = clean_sentence(generated_output, val_data_loader.dataset.vocab.idx2word)
+    
+    predicted_captions[image_id.item()].append(generated_sentence)
+
+
+# In[7]:
+
+
+import random
+import matplotlib.pyplot as plt
+from collections import defaultdict
+from tqdm import tqdm
+import torch
+
+def clean_sentence(output, idx2word):
+    sentence = ' '.join([idx2word[word_idx] for word_idx in output])
+    return sentence
+
+def show_image_with_caption(img, caption):
+    plt.imshow(img)
+    plt.title(caption)
+    plt.axis('off')
+    plt.show()
+
+num_samples = 5 
+random_indices = random.sample(range(len(val_data_loader.dataset)), num_samples)
+print(random_indices)
+pred_result = defaultdict(list)
+transform_test_2 = transforms.Compose(
+    [
+        transforms.Resize(224),
+        transforms.ToTensor(),
+    ]
+)
+
+val_data_loader_no_tx = val_get_loader(
+     transform=transform_test_2,mode="valid", cocoapi_loc=coco_data
+)
+
+for idx in tqdm(random_indices):
+    print(idx)
+    _, img = val_data_loader.dataset[idx]  
+    _, img2 = val_data_loader_no_tx.dataset[idx]  
+
+    print(_)
+    img = img.unsqueeze(0).to(device)  
+    
+    with torch.no_grad():
+        features = encoder(img).unsqueeze(1)
+        output = decoder.generate_caption(features)
+    
+    sentence = clean_sentence(output, val_data_loader.dataset.vocab.idx2word)
+    pred_result[idx].append(sentence)
+
+    img2 = img2.cpu().squeeze(0).permute(1, 2, 0)  
+    img2 = img2.numpy()
+    img2 = img2 * 255.0  
+    img2 = img2.astype('uint8')
+
+    img = img.cpu().squeeze(0).permute(1, 2, 0)  
+    img = img.numpy()
+    img = img * 255.0  
+    img = img.astype('uint8')
+
+    show_image_with_caption(img2, sentence)
+
+
+# In[8]:
+
+
+with open(os.path.join(coco_data, "cocoapi", "annotations/captions_val2017.json"), "r") as file:
+    captions_data = json.load(file)
+
+validation_annotations = captions_data["annotations"]
+validation_results = defaultdict(list)
+
+for annotation in validation_annotations:
+    validation_results[annotation["image_id"]].append(annotation["caption"].lower())
+
+
+# In[13]:
+
+
+predicted_captions
+
+
+# In[15]:
+
+
+from nltk.translate.meteor_score import meteor_score
+from nltk.tokenize import word_tokenize
+from collections import Counter, defaultdict
+import math
+import numpy as np
+
+def calculate_meteor_score(true_sentences, predicted_sentences):
+    meteor_scores = []
+    common_keys = set(true_sentences.keys()).intersection(set(predicted_sentences.keys()))
+    
+    for img_id in common_keys:
+        references = [word_tokenize(cap.lower()) for cap in true_sentences[img_id]]
+        hypothesis = word_tokenize(predicted_sentences[img_id][0].lower())
+        # print("references,:",references,"HYPO:",hypothesis)
+        
+        score = meteor_score(references, hypothesis)
+        meteor_scores.append(score)
+    
+    avg_meteor_score = sum(meteor_scores) / len(meteor_scores) if meteor_scores else 0.0
+    return avg_meteor_score
+
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+
+def calculate_bleu_score(true_sentences, predicted_sentences):
+    hypotheses = []
+    references = []
+
+    # Find the intersection of keys between true and predicted sentences
+    common_keys = set(true_sentences.keys()).intersection(set(predicted_sentences.keys()))
+
+    # Prepare the hypotheses and references
+    for img_id in common_keys:
+        img_refs = [cap.split() for cap in true_sentences[img_id]]
+        references.append(img_refs)
+        hypotheses.append(predicted_sentences[img_id][0].strip().split())
+
+    # Use a smoothing function to avoid issues with zero counts
+    smoothing_function = SmoothingFunction().method4
+
+    # Calculate BLEU score for each sentence and average them
+    bleu_scores = [sentence_bleu(refs, hyp, smoothing_function=smoothing_function) for refs, hyp in zip(references, hypotheses)]
+    avg_bleu_score = sum(bleu_scores) / len(bleu_scores) if bleu_scores else 0.0
+    
+    return avg_bleu_score
+
+meteor_score = calculate_meteor_score(validation_results, predicted_captions)
+bleu_score = calculate_bleu_score(validation_results, predicted_captions)
+print(f"METEOR Score: {meteor_score}")
+print(f"BLEU Score: {bleu_score}")
+
+
+# In[16]:
+
+
+from PIL import Image
+def load_image(image_path, transform=None):
+    image = Image.open(image_path).convert('RGB')
+    if transform is not None:
+        image = transform(image).unsqueeze(0)  
+    return image
+
+def generate_caption(image_path, encoder, decoder, transform, device):
+    image = load_image(image_path, transform)
+    image = image.to(device)
+    
+    with torch.no_grad():
+        features = encoder(image).unsqueeze(1)
+        output = decoder.generate_caption(features)
+    
+    sentence = clean_sentence(output, val_data_loader.dataset.vocab.idx2word)
+    return sentence
+
+
+# In[ ]:
+
+
+# Define the path to your image.
+image_path = "test.jpg"
+
+# Generate and print the caption.
+caption = generate_caption(image_path, encoder, decoder, transform_test, device)
+print("Generated Caption:", caption)
+
+
+# In[ ]:
+
+
+import torch
+from PIL import Image
+import matplotlib.pyplot as plt
+
+
+def display_image_with_caption(image_path, caption, transform=None):
+    # Load and transform the image
+    image = Image.open(image_path).convert('RGB')
+    if transform is not None:
+        image = transform(image)
+    
+    # Display the image with the caption
+    plt.figure(figsize=(10, 10))
+    plt.imshow(image)
+    plt.title(caption, fontsize=15, wrap=True)
+    plt.axis('off')
+    plt.show()
+
+display_image_with_caption(image_path, caption, transform=None)
+
